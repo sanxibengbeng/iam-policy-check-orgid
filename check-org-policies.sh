@@ -3,7 +3,13 @@
 # AWS账号组织策略检查脚本
 # 用于检查账号中所有服务的策略是否包含组织相关配置
 
-set -e
+# 改进错误处理 - 不要在管道失败时立即退出
+set -o pipefail
+
+# 调试模式 - 如果设置了DEBUG环境变量则启用
+if [ "${DEBUG:-}" = "1" ]; then
+    set -x
+fi
 
 # 颜色定义
 RED='\033[0;31m'
@@ -39,6 +45,32 @@ echo ""
 echo "AWS账号组织策略检查详细日志 - $(date)" > "$DETAILED_LOG_FILE"
 echo "========================================" >> "$DETAILED_LOG_FILE"
 echo ""
+
+# 错误处理函数
+handle_error() {
+    local service="$1"
+    local operation="$2"
+    local error_msg="$3"
+    
+    echo -e "${YELLOW}[警告] $service - $operation: $error_msg${NC}"
+    echo "WARNING: $service - $operation: $error_msg" >> "$LOG_FILE"
+    log_check_detail "$service" "$operation" "错误" "$error_msg"
+}
+
+# 安全执行AWS命令的函数
+safe_aws_call() {
+    local cmd="$1"
+    local error_context="$2"
+    
+    local result
+    if result=$(eval "$cmd" 2>/dev/null); then
+        echo "$result"
+        return 0
+    else
+        handle_error "AWS" "$error_context" "命令执行失败: $cmd"
+        return 1
+    fi
+}
 
 # 记录问题的函数
 log_issue() {
@@ -116,76 +148,115 @@ check_iam_policies() {
     
     # 检查IAM角色
     echo "检查IAM角色..."
-    while read -r role; do
-        if [ -n "$role" ]; then
-            ((checked_roles++))
-            log_check_detail "IAM" "Role:$role" "检查中" "检查角色信任策略"
-            
-            policy_doc=$(aws iam get-role --role-name "$role" --query 'Role.AssumeRolePolicyDocument' --output text 2>/dev/null || echo "")
-            if [ -n "$policy_doc" ] && [ "$policy_doc" != "None" ]; then
-                if check_org_keywords "$policy_doc"; then
-                    log_issue "IAM" "Role:$role" "信任策略包含组织相关配置" "$policy_doc"
-                    log_check_detail "IAM" "Role:$role" "有问题" "信任策略包含组织相关配置"
-                else
-                    log_check_detail "IAM" "Role:$role" "正常" "信任策略无组织相关配置"
-                fi
-            else
-                log_check_detail "IAM" "Role:$role" "无策略" "未找到信任策略"
-            fi
-            
-            # 检查附加的策略
-            while read -r policy_arn; do
-                if [ -n "$policy_arn" ]; then
-                    ((checked_policies++))
-                    log_check_detail "IAM" "Policy:$policy_arn" "检查中" "检查角色附加策略"
-                    
-                    version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || echo "")
-                    if [ -n "$version_id" ]; then
-                        policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null || echo "")
-                        if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
-                            if check_org_keywords "$policy_content"; then
-                                log_issue "IAM" "Policy:$policy_arn" "策略包含组织相关配置" "$policy_content"
-                                log_check_detail "IAM" "Policy:$policy_arn" "有问题" "策略包含组织相关配置"
-                            else
-                                log_check_detail "IAM" "Policy:$policy_arn" "正常" "策略无组织相关配置"
-                            fi
-                        else
-                            log_check_detail "IAM" "Policy:$policy_arn" "无内容" "策略内容为空"
-                        fi
+    
+    # 使用临时文件避免管道问题
+    local roles_file=$(mktemp)
+    aws iam list-roles --query 'Roles[].RoleName' --output text 2>/dev/null > "$roles_file" || {
+        echo "获取IAM角色列表失败" >> "$LOG_FILE"
+        rm -f "$roles_file"
+        return 1
+    }
+    
+    # 处理角色列表
+    if [ -s "$roles_file" ]; then
+        tr '\t' '\n' < "$roles_file" | while read -r role; do
+            if [ -n "$role" ] && [ "$role" != "None" ]; then
+                ((checked_roles++))
+                echo "检查角色: $role"
+                log_check_detail "IAM" "Role:$role" "检查中" "检查角色信任策略"
+                
+                # 获取角色信任策略
+                policy_doc=$(aws iam get-role --role-name "$role" --query 'Role.AssumeRolePolicyDocument' --output text 2>/dev/null || echo "")
+                if [ -n "$policy_doc" ] && [ "$policy_doc" != "None" ]; then
+                    if check_org_keywords "$policy_doc"; then
+                        log_issue "IAM" "Role:$role" "信任策略包含组织相关配置" "$policy_doc"
+                        log_check_detail "IAM" "Role:$role" "有问题" "信任策略包含组织相关配置"
+                    else
+                        log_check_detail "IAM" "Role:$role" "正常" "信任策略无组织相关配置"
                     fi
+                else
+                    log_check_detail "IAM" "Role:$role" "无策略" "未找到信任策略"
                 fi
-            done < <(aws iam list-attached-role-policies --role-name "$role" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null | tr '\t' '\n')
-        fi
-    done < <(aws iam list-roles --query 'Roles[].RoleName' --output text 2>/dev/null | tr '\t' '\n')
+                
+                # 检查附加的策略
+                local policies_file=$(mktemp)
+                aws iam list-attached-role-policies --role-name "$role" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null > "$policies_file" || echo "" > "$policies_file"
+                
+                if [ -s "$policies_file" ]; then
+                    tr '\t' '\n' < "$policies_file" | while read -r policy_arn; do
+                        if [ -n "$policy_arn" ] && [ "$policy_arn" != "None" ]; then
+                            ((checked_policies++))
+                            log_check_detail "IAM" "Policy:$policy_arn" "检查中" "检查角色附加策略"
+                            
+                            version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || echo "")
+                            if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
+                                policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null || echo "")
+                                if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
+                                    if check_org_keywords "$policy_content"; then
+                                        log_issue "IAM" "Policy:$policy_arn" "策略包含组织相关配置" "$policy_content"
+                                        log_check_detail "IAM" "Policy:$policy_arn" "有问题" "策略包含组织相关配置"
+                                    else
+                                        log_check_detail "IAM" "Policy:$policy_arn" "正常" "策略无组织相关配置"
+                                    fi
+                                else
+                                    log_check_detail "IAM" "Policy:$policy_arn" "无内容" "策略内容为空"
+                                fi
+                            fi
+                        fi
+                    done
+                fi
+                rm -f "$policies_file"
+            fi
+        done
+    fi
+    rm -f "$roles_file"
     
     # 检查IAM用户
     echo "检查IAM用户..."
-    while read -r user; do
-        if [ -n "$user" ]; then
-            ((checked_users++))
-            log_check_detail "IAM" "User:$user" "检查中" "检查用户附加策略"
-            
-            while read -r policy_arn; do
-                if [ -n "$policy_arn" ]; then
-                    ((checked_policies++))
-                    version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || echo "")
-                    if [ -n "$version_id" ]; then
-                        policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null || echo "")
-                        if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
-                            if check_org_keywords "$policy_content"; then
-                                log_issue "IAM" "UserPolicy:$user->$policy_arn" "用户策略包含组织相关配置" "$policy_content"
-                                log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "有问题" "用户策略包含组织相关配置"
-                            else
-                                log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "正常" "用户策略无组织相关配置"
+    
+    local users_file=$(mktemp)
+    aws iam list-users --query 'Users[].UserName' --output text 2>/dev/null > "$users_file" || {
+        echo "获取IAM用户列表失败" >> "$LOG_FILE"
+        rm -f "$users_file"
+        return 1
+    }
+    
+    if [ -s "$users_file" ]; then
+        tr '\t' '\n' < "$users_file" | while read -r user; do
+            if [ -n "$user" ] && [ "$user" != "None" ]; then
+                ((checked_users++))
+                echo "检查用户: $user"
+                log_check_detail "IAM" "User:$user" "检查中" "检查用户附加策略"
+                
+                local user_policies_file=$(mktemp)
+                aws iam list-attached-user-policies --user-name "$user" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null > "$user_policies_file" || echo "" > "$user_policies_file"
+                
+                if [ -s "$user_policies_file" ]; then
+                    tr '\t' '\n' < "$user_policies_file" | while read -r policy_arn; do
+                        if [ -n "$policy_arn" ] && [ "$policy_arn" != "None" ]; then
+                            ((checked_policies++))
+                            version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || echo "")
+                            if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
+                                policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null || echo "")
+                                if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
+                                    if check_org_keywords "$policy_content"; then
+                                        log_issue "IAM" "UserPolicy:$user->$policy_arn" "用户策略包含组织相关配置" "$policy_content"
+                                        log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "有问题" "用户策略包含组织相关配置"
+                                    else
+                                        log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "正常" "用户策略无组织相关配置"
+                                    fi
+                                else
+                                    log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "无内容" "策略内容为空"
+                                fi
                             fi
-                        else
-                            log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "无内容" "策略内容为空"
                         fi
-                    fi
+                    done
                 fi
-            done < <(aws iam list-attached-user-policies --user-name "$user" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null | tr '\t' '\n')
-        fi
-    done < <(aws iam list-users --query 'Users[].UserName' --output text 2>/dev/null | tr '\t' '\n')
+                rm -f "$user_policies_file"
+            fi
+        done
+    fi
+    rm -f "$users_file"
     
     echo "IAM检查完成: 角色($checked_roles), 用户($checked_users), 策略($checked_policies)"
     echo "IAM检查完成: 角色($checked_roles), 用户($checked_users), 策略($checked_policies)" >> "$LOG_FILE"
