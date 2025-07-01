@@ -193,8 +193,12 @@ chmod +x check-org-policies.sh
 
 工具会生成以下文件：
 
-- **JSON报告** (`org-policy-issues-YYYYMMDD-HHMMSS.json`): 包含所有问题的详细信息
-- **日志文件** (`org-policy-check-YYYYMMDD-HHMMSS.log`, 仅Bash版本): 包含检查过程的详细日志
+- **主日志文件** (`org-policy-check-YYYYMMDD-HHMMSS.log`): 包含发现的问题和错误信息
+- **详细日志文件** (`org-policy-detailed-YYYYMMDD-HHMMSS.log`): 包含所有检查项目的详细记录，包括：
+  - 每个检查的资源名称
+  - 检查状态（正常/有问题/无策略等）
+  - 详细的检查结果说明
+- **JSON报告** (`org-policy-issues-YYYYMMDD-HHMMSS.json`): 包含所有问题和检查记录的结构化数据
 
 ## 故障排除
 

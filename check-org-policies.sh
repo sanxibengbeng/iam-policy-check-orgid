@@ -48,7 +48,17 @@ update_check_count() {
 # 检查字符串中是否包含组织相关关键词
 check_org_keywords() {
     local content="$1"
-    local keywords=("aws:PrincipalOrgID" "aws:PrincipalOrgPaths" "aws:RequestedRegion" "organizations:" "o-[a-z0-9]{10}" "ou-[a-z0-9]+-[a-z0-9]{8}")
+    local keywords=(
+        "aws:PrincipalOrgID"
+        "aws:PrincipalOrgPaths"
+        "aws:ResourceOrgID"
+        "aws:ResourceOrgPaths"
+        "aws:SourceOrgID"
+        "aws:SourceOrgPaths"
+        "organizations:"
+        "o-[a-z0-9]{10}"
+        "ou-[a-z0-9]+-[a-z0-9]{8}"
+    )
     
     for keyword in "${keywords[@]}"; do
         if echo "$content" | grep -qi "$keyword"; then

@@ -1,0 +1,1 @@
+我要将一个aws account 从一个org迁移到另外一个org，希望利用aws cli检查当前账号里面所有有policy的服务，确定policy 里面没有和org相关的配置
