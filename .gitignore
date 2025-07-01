@@ -38,13 +38,14 @@ aws-credentials
 *.key
 *.crt
 
-# Log Files and Reports
+# Log Files and Reports (both root and logs directory)
 *.log
 org-policy-check-*.log
 org-policy-detailed-*.log
 org-policy-issues-*.json
-logs/
-reports/
+logs/*.log
+logs/*.json
+logs/org-policy-*
 
 # IDE and Editor Files
 .vscode/
