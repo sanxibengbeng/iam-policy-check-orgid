@@ -43,8 +43,10 @@ aws-credentials
 org-policy-check-*.log
 org-policy-detailed-*.log
 org-policy-issues-*.json
+org-policy-findings-*.txt
 logs/*.log
 logs/*.json
+logs/*.txt
 logs/org-policy-*
 
 # IDE and Editor Files

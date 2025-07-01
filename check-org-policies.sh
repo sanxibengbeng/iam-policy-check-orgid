@@ -27,15 +27,23 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 LOG_FILE="$LOGS_DIR/org-policy-check-$TIMESTAMP.log"
 DETAILED_LOG_FILE="$LOGS_DIR/org-policy-detailed-$TIMESTAMP.log"
 ISSUES_FILE="$LOGS_DIR/org-policy-issues-$TIMESTAMP.json"
+ORG_FINDINGS_FILE="$LOGS_DIR/org-policy-findings-$TIMESTAMP.txt"
 
 echo -e "${BLUE}=== AWS账号组织策略检查工具 ===${NC}"
 echo "主日志文件: $LOG_FILE"
 echo "详细日志文件: $DETAILED_LOG_FILE"
 echo "问题报告: $ISSUES_FILE"
+echo "组织相关发现: $ORG_FINDINGS_FILE"
 echo ""
 
 # 初始化问题报告文件
 echo '{"issues": [], "summary": {"total_checks": 0, "issues_found": 0}, "check_details": []}' > "$ISSUES_FILE"
+
+# 初始化组织相关发现文件
+echo "AWS账号组织策略检查 - 组织相关发现" > "$ORG_FINDINGS_FILE"
+echo "检查时间: $(date)" >> "$ORG_FINDINGS_FILE"
+echo "========================================" >> "$ORG_FINDINGS_FILE"
+echo "" >> "$ORG_FINDINGS_FILE"
 
 # 初始化日志文件
 echo "AWS账号组织策略检查 - $(date)" > "$LOG_FILE"
@@ -137,14 +145,15 @@ check_org_keywords() {
 # 检查函数定义
 # ========================================
 
-# 1. 检查IAM策略
+# 1. 检查IAM策略 - 仅检查客户管理的策略
 check_iam_policies() {
-    echo -e "${BLUE}1. 检查IAM策略${NC}"
+    echo -e "${BLUE}1. 检查IAM策略 (仅客户管理策略)${NC}"
     update_check_count
     
     local checked_roles=0
     local checked_users=0
     local checked_policies=0
+    local customer_managed_policies=0
     
     # 检查IAM角色
     echo "检查IAM角色..."
@@ -171,6 +180,10 @@ check_iam_policies() {
                     if check_org_keywords "$policy_doc"; then
                         log_issue "IAM" "Role:$role" "信任策略包含组织相关配置" "$policy_doc"
                         log_check_detail "IAM" "Role:$role" "有问题" "信任策略包含组织相关配置"
+                        # 输出到单独的结果文件
+                        echo "Role Trust Policy: $role" >> "$ORG_FINDINGS_FILE"
+                        echo "Policy Content: $policy_doc" >> "$ORG_FINDINGS_FILE"
+                        echo "---" >> "$ORG_FINDINGS_FILE"
                     else
                         log_check_detail "IAM" "Role:$role" "正常" "信任策略无组织相关配置"
                     fi
@@ -178,29 +191,39 @@ check_iam_policies() {
                     log_check_detail "IAM" "Role:$role" "无策略" "未找到信任策略"
                 fi
                 
-                # 检查附加的策略
+                # 检查附加的客户管理策略
                 local policies_file=$(mktemp)
                 aws iam list-attached-role-policies --role-name "$role" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null > "$policies_file" || echo "" > "$policies_file"
                 
                 if [ -s "$policies_file" ]; then
                     tr '\t' '\n' < "$policies_file" | while read -r policy_arn; do
                         if [ -n "$policy_arn" ] && [ "$policy_arn" != "None" ]; then
-                            ((checked_policies++))
-                            log_check_detail "IAM" "Policy:$policy_arn" "检查中" "检查角色附加策略"
-                            
-                            version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || echo "")
-                            if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
-                                policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null || echo "")
-                                if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
-                                    if check_org_keywords "$policy_content"; then
-                                        log_issue "IAM" "Policy:$policy_arn" "策略包含组织相关配置" "$policy_content"
-                                        log_check_detail "IAM" "Policy:$policy_arn" "有问题" "策略包含组织相关配置"
+                            # 只检查客户管理的策略 (不包含 aws:policy)
+                            if [[ "$policy_arn" != *"arn:aws:iam::aws:policy"* ]]; then
+                                ((checked_policies++))
+                                ((customer_managed_policies++))
+                                log_check_detail "IAM" "Policy:$policy_arn" "检查中" "检查客户管理策略"
+                                
+                                version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || echo "")
+                                if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
+                                    policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null || echo "")
+                                    if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
+                                        if check_org_keywords "$policy_content"; then
+                                            log_issue "IAM" "Policy:$policy_arn" "客户管理策略包含组织相关配置" "$policy_content"
+                                            log_check_detail "IAM" "Policy:$policy_arn" "有问题" "客户管理策略包含组织相关配置"
+                                            # 输出到单独的结果文件
+                                            echo "Customer Managed Policy: $policy_arn (attached to role: $role)" >> "$ORG_FINDINGS_FILE"
+                                            echo "Policy Content: $policy_content" >> "$ORG_FINDINGS_FILE"
+                                            echo "---" >> "$ORG_FINDINGS_FILE"
+                                        else
+                                            log_check_detail "IAM" "Policy:$policy_arn" "正常" "客户管理策略无组织相关配置"
+                                        fi
                                     else
-                                        log_check_detail "IAM" "Policy:$policy_arn" "正常" "策略无组织相关配置"
+                                        log_check_detail "IAM" "Policy:$policy_arn" "无内容" "策略内容为空"
                                     fi
-                                else
-                                    log_check_detail "IAM" "Policy:$policy_arn" "无内容" "策略内容为空"
                                 fi
+                            else
+                                log_check_detail "IAM" "Policy:$policy_arn" "跳过" "AWS管理策略，已跳过"
                             fi
                         fi
                     done
@@ -211,7 +234,7 @@ check_iam_policies() {
     fi
     rm -f "$roles_file"
     
-    # 检查IAM用户
+    # 检查IAM用户的客户管理策略
     echo "检查IAM用户..."
     
     local users_file=$(mktemp)
@@ -226,7 +249,7 @@ check_iam_policies() {
             if [ -n "$user" ] && [ "$user" != "None" ]; then
                 ((checked_users++))
                 echo "检查用户: $user"
-                log_check_detail "IAM" "User:$user" "检查中" "检查用户附加策略"
+                log_check_detail "IAM" "User:$user" "检查中" "检查用户附加的客户管理策略"
                 
                 local user_policies_file=$(mktemp)
                 aws iam list-attached-user-policies --user-name "$user" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null > "$user_policies_file" || echo "" > "$user_policies_file"
@@ -234,20 +257,30 @@ check_iam_policies() {
                 if [ -s "$user_policies_file" ]; then
                     tr '\t' '\n' < "$user_policies_file" | while read -r policy_arn; do
                         if [ -n "$policy_arn" ] && [ "$policy_arn" != "None" ]; then
-                            ((checked_policies++))
-                            version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || echo "")
-                            if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
-                                policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null || echo "")
-                                if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
-                                    if check_org_keywords "$policy_content"; then
-                                        log_issue "IAM" "UserPolicy:$user->$policy_arn" "用户策略包含组织相关配置" "$policy_content"
-                                        log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "有问题" "用户策略包含组织相关配置"
+                            # 只检查客户管理的策略
+                            if [[ "$policy_arn" != *"arn:aws:iam::aws:policy"* ]]; then
+                                ((checked_policies++))
+                                ((customer_managed_policies++))
+                                version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || echo "")
+                                if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
+                                    policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null || echo "")
+                                    if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
+                                        if check_org_keywords "$policy_content"; then
+                                            log_issue "IAM" "UserPolicy:$user->$policy_arn" "用户的客户管理策略包含组织相关配置" "$policy_content"
+                                            log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "有问题" "用户的客户管理策略包含组织相关配置"
+                                            # 输出到单独的结果文件
+                                            echo "Customer Managed Policy: $policy_arn (attached to user: $user)" >> "$ORG_FINDINGS_FILE"
+                                            echo "Policy Content: $policy_content" >> "$ORG_FINDINGS_FILE"
+                                            echo "---" >> "$ORG_FINDINGS_FILE"
+                                        else
+                                            log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "正常" "用户的客户管理策略无组织相关配置"
+                                        fi
                                     else
-                                        log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "正常" "用户策略无组织相关配置"
+                                        log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "无内容" "策略内容为空"
                                     fi
-                                else
-                                    log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "无内容" "策略内容为空"
                                 fi
+                            else
+                                log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "跳过" "AWS管理策略，已跳过"
                             fi
                         fi
                     done
@@ -258,8 +291,42 @@ check_iam_policies() {
     fi
     rm -f "$users_file"
     
-    echo "IAM检查完成: 角色($checked_roles), 用户($checked_users), 策略($checked_policies)"
-    echo "IAM检查完成: 角色($checked_roles), 用户($checked_users), 策略($checked_policies)" >> "$LOG_FILE"
+    # 检查独立的客户管理策略（未附加到任何实体的）
+    echo "检查独立的客户管理策略..."
+    local standalone_policies_file=$(mktemp)
+    aws iam list-policies --scope Local --query 'Policies[].Arn' --output text 2>/dev/null > "$standalone_policies_file" || echo "" > "$standalone_policies_file"
+    
+    if [ -s "$standalone_policies_file" ]; then
+        tr '\t' '\n' < "$standalone_policies_file" | while read -r policy_arn; do
+            if [ -n "$policy_arn" ] && [ "$policy_arn" != "None" ]; then
+                ((customer_managed_policies++))
+                log_check_detail "IAM" "StandalonePolicy:$policy_arn" "检查中" "检查独立的客户管理策略"
+                
+                version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || echo "")
+                if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
+                    policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null || echo "")
+                    if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
+                        if check_org_keywords "$policy_content"; then
+                            log_issue "IAM" "StandalonePolicy:$policy_arn" "独立的客户管理策略包含组织相关配置" "$policy_content"
+                            log_check_detail "IAM" "StandalonePolicy:$policy_arn" "有问题" "独立的客户管理策略包含组织相关配置"
+                            # 输出到单独的结果文件
+                            echo "Standalone Customer Managed Policy: $policy_arn" >> "$ORG_FINDINGS_FILE"
+                            echo "Policy Content: $policy_content" >> "$ORG_FINDINGS_FILE"
+                            echo "---" >> "$ORG_FINDINGS_FILE"
+                        else
+                            log_check_detail "IAM" "StandalonePolicy:$policy_arn" "正常" "独立的客户管理策略无组织相关配置"
+                        fi
+                    else
+                        log_check_detail "IAM" "StandalonePolicy:$policy_arn" "无内容" "策略内容为空"
+                    fi
+                fi
+            fi
+        done
+    fi
+    rm -f "$standalone_policies_file"
+    
+    echo "IAM检查完成: 角色($checked_roles), 用户($checked_users), 客户管理策略($customer_managed_policies)"
+    echo "IAM检查完成: 角色($checked_roles), 用户($checked_users), 客户管理策略($customer_managed_policies)" >> "$LOG_FILE"
 }
 
 # 2. 检查S3存储桶策略
@@ -279,6 +346,10 @@ check_s3_policies() {
                 if check_org_keywords "$bucket_policy"; then
                     log_issue "S3" "Bucket:$bucket" "存储桶策略包含组织相关配置" "$bucket_policy"
                     log_check_detail "S3" "Bucket:$bucket" "有问题" "存储桶策略包含组织相关配置"
+                    # 输出到单独的结果文件
+                    echo "S3 Bucket Policy: $bucket" >> "$ORG_FINDINGS_FILE"
+                    echo "Policy Content: $bucket_policy" >> "$ORG_FINDINGS_FILE"
+                    echo "---" >> "$ORG_FINDINGS_FILE"
                 else
                     log_check_detail "S3" "Bucket:$bucket" "正常" "存储桶策略无组织相关配置"
                 fi
@@ -309,6 +380,10 @@ check_kms_policies() {
                 if check_org_keywords "$key_policy"; then
                     log_issue "KMS" "Key:$key_id" "密钥策略包含组织相关配置" "$key_policy"
                     log_check_detail "KMS" "Key:$key_id" "有问题" "密钥策略包含组织相关配置"
+                    # 输出到单独的结果文件
+                    echo "KMS Key Policy: $key_id" >> "$ORG_FINDINGS_FILE"
+                    echo "Policy Content: $key_policy" >> "$ORG_FINDINGS_FILE"
+                    echo "---" >> "$ORG_FINDINGS_FILE"
                 else
                     log_check_detail "KMS" "Key:$key_id" "正常" "密钥策略无组织相关配置"
                 fi
@@ -339,6 +414,10 @@ check_lambda_policies() {
                 if check_org_keywords "$function_policy"; then
                     log_issue "Lambda" "Function:$function_name" "函数策略包含组织相关配置" "$function_policy"
                     log_check_detail "Lambda" "Function:$function_name" "有问题" "函数策略包含组织相关配置"
+                    # 输出到单独的结果文件
+                    echo "Lambda Function Policy: $function_name" >> "$ORG_FINDINGS_FILE"
+                    echo "Policy Content: $function_policy" >> "$ORG_FINDINGS_FILE"
+                    echo "---" >> "$ORG_FINDINGS_FILE"
                 else
                     log_check_detail "Lambda" "Function:$function_name" "正常" "函数策略无组织相关配置"
                 fi
@@ -369,6 +448,10 @@ check_sns_policies() {
                 if check_org_keywords "$topic_policy"; then
                     log_issue "SNS" "Topic:$topic_arn" "主题策略包含组织相关配置" "$topic_policy"
                     log_check_detail "SNS" "Topic:$topic_arn" "有问题" "主题策略包含组织相关配置"
+                    # 输出到单独的结果文件
+                    echo "SNS Topic Policy: $topic_arn" >> "$ORG_FINDINGS_FILE"
+                    echo "Policy Content: $topic_policy" >> "$ORG_FINDINGS_FILE"
+                    echo "---" >> "$ORG_FINDINGS_FILE"
                 else
                     log_check_detail "SNS" "Topic:$topic_arn" "正常" "主题策略无组织相关配置"
                 fi
@@ -399,6 +482,10 @@ check_sqs_policies() {
                 if check_org_keywords "$queue_policy"; then
                     log_issue "SQS" "Queue:$queue_url" "队列策略包含组织相关配置" "$queue_policy"
                     log_check_detail "SQS" "Queue:$queue_url" "有问题" "队列策略包含组织相关配置"
+                    # 输出到单独的结果文件
+                    echo "SQS Queue Policy: $queue_url" >> "$ORG_FINDINGS_FILE"
+                    echo "Policy Content: $queue_policy" >> "$ORG_FINDINGS_FILE"
+                    echo "---" >> "$ORG_FINDINGS_FILE"
                 else
                     log_check_detail "SQS" "Queue:$queue_url" "正常" "队列策略无组织相关配置"
                 fi
@@ -561,12 +648,16 @@ echo "总检查项目: $total_checks"
 echo "发现问题: $issues_found"
 echo "总检查项目: $total_checks, 发现问题: $issues_found" >> "$LOG_FILE"
 
+# 检查组织相关发现文件的内容
+org_findings_count=$(grep -c "^[A-Z].*:" "$ORG_FINDINGS_FILE" 2>/dev/null || echo "0")
+
 if [ "$issues_found" -gt 0 ]; then
     echo -e "${RED}发现 $issues_found 个与组织相关的策略配置问题${NC}"
     echo "详细信息请查看:"
     echo "- 主日志文件: $LOG_FILE"
     echo "- 详细日志文件: $DETAILED_LOG_FILE"
     echo "- JSON报告: $ISSUES_FILE"
+    echo -e "${YELLOW}- 组织相关发现详情: $ORG_FINDINGS_FILE${NC}"
     echo ""
     echo -e "${YELLOW}建议在迁移账号前修复这些问题${NC}"
     
@@ -576,6 +667,14 @@ if [ "$issues_found" -gt 0 ]; then
     jq -r '.issues | group_by(.service) | .[] | "\(.[0].service): \(length) 个问题"' "$ISSUES_FILE" | while read -r line; do
         echo "  - $line"
     done
+    
+    # 显示组织相关发现的摘要
+    if [ "$org_findings_count" -gt 0 ]; then
+        echo ""
+        echo -e "${YELLOW}组织相关发现摘要:${NC}"
+        echo "  - 共发现 $org_findings_count 个包含组织相关配置的资源"
+        echo "  - 详细策略内容已保存到: $ORG_FINDINGS_FILE"
+    fi
 else
     echo -e "${GREEN}未发现组织相关的策略配置问题${NC}"
     echo -e "${GREEN}账号可以安全迁移${NC}"
@@ -585,7 +684,21 @@ echo ""
 echo "检查完成时间: $(date)"
 echo "检查完成时间: $(date)" >> "$LOG_FILE"
 echo ""
-echo "日志文件位置:"
+echo "文件输出位置:"
 echo "- 主日志: $LOG_FILE"
 echo "- 详细日志: $DETAILED_LOG_FILE"
 echo "- JSON报告: $ISSUES_FILE"
+if [ "$org_findings_count" -gt 0 ]; then
+    echo -e "${YELLOW}- 组织相关发现: $ORG_FINDINGS_FILE (包含 $org_findings_count 个发现)${NC}"
+else
+    echo "- 组织相关发现: $ORG_FINDINGS_FILE (无发现)"
+fi
+
+# 在组织相关发现文件末尾添加总结
+echo "" >> "$ORG_FINDINGS_FILE"
+echo "========================================" >> "$ORG_FINDINGS_FILE"
+echo "检查总结:" >> "$ORG_FINDINGS_FILE"
+echo "- 检查完成时间: $(date)" >> "$ORG_FINDINGS_FILE"
+echo "- 总检查项目: $total_checks" >> "$ORG_FINDINGS_FILE"
+echo "- 发现问题: $issues_found" >> "$ORG_FINDINGS_FILE"
+echo "- 组织相关发现: $org_findings_count" >> "$ORG_FINDINGS_FILE"
