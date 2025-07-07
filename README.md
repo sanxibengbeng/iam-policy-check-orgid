@@ -361,6 +361,16 @@ Policy Content: {
    - 确保网络连接正常
    - 检查是否有代理或防火墙限制
 
+5. **jq参数错误**
+   - 如果遇到 `jq: --arg takes two parameters` 错误
+   - 运行 `./test-jq-fix.sh` 验证修复
+   - 使用较小的并行任务数: `MAX_PARALLEL_JOBS=3 ./check-org-policies-optimized.sh`
+
+6. **优化版本性能问题**
+   - 并行任务过多导致系统卡顿: 减少 `MAX_PARALLEL_JOBS`
+   - AWS API限流: 进一步减少并行任务数
+   - 内存不足: 使用 `MAX_PARALLEL_JOBS=2` 或更小值
+
 ### 调试模式
 
 启用调试模式获取更详细的执行信息：

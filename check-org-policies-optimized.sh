@@ -75,11 +75,11 @@ safe_log() {
 
 # 线程安全的JSON更新函数
 safe_json_update() {
-    local update_cmd="$1"
+    local jq_args=("$@")
     
     (
         flock -x 200
-        jq "$update_cmd" "$ISSUES_FILE" > "$TEMP_DIR/tmp.json" && mv "$TEMP_DIR/tmp.json" "$ISSUES_FILE"
+        jq "${jq_args[@]}" "$ISSUES_FILE" > "$TEMP_DIR/tmp.json" && mv "$TEMP_DIR/tmp.json" "$ISSUES_FILE"
     ) 200>>"$ISSUES_FILE.lock"
 }
 
@@ -104,8 +104,13 @@ log_issue() {
     echo -e "${RED}[问题] $service - $resource: $issue${NC}"
     safe_log "$service - $resource: $issue - $details" "$LOG_FILE"
     
-    # 添加到JSON报告
-    safe_json_update --arg service "$service" --arg resource "$resource" --arg issue "$issue" --arg details "$details" \
+    # 添加到JSON报告 - 确保参数不为空
+    local safe_service="${service:-unknown}"
+    local safe_resource="${resource:-unknown}"
+    local safe_issue="${issue:-unknown}"
+    local safe_details="${details:-}"
+    
+    safe_json_update --arg service "$safe_service" --arg resource "$safe_resource" --arg issue "$safe_issue" --arg details "$safe_details" \
        '.issues += [{"service": $service, "resource": $resource, "issue": $issue, "details": $details}] | .summary.issues_found += 1'
 }
 
@@ -118,8 +123,13 @@ log_check_detail() {
     
     safe_log "[$service] $resource: $status - $message" "$DETAILED_LOG_FILE"
     
-    # 添加到JSON报告的详细记录
-    safe_json_update --arg service "$service" --arg resource "$resource" --arg status "$status" --arg message "$message" \
+    # 添加到JSON报告的详细记录 - 确保参数不为空
+    local safe_service="${service:-unknown}"
+    local safe_resource="${resource:-unknown}"
+    local safe_status="${status:-unknown}"
+    local safe_message="${message:-}"
+    
+    safe_json_update --arg service "$safe_service" --arg resource "$safe_resource" --arg status "$safe_status" --arg message "$safe_message" \
        '.check_details += [{"service": $service, "resource": $resource, "status": $status, "message": $message, "timestamp": now | strftime("%Y-%m-%d %H:%M:%S")}]'
 }
 
@@ -170,53 +180,77 @@ process_iam_role() {
     local role="$1"
     local temp_file="$TEMP_DIR/role_$role.tmp"
     
+    # 验证输入参数
+    if [ -z "$role" ] || [ "$role" = "None" ]; then
+        return 0
+    fi
+    
     {
         echo "检查角色: $role"
         log_check_detail "IAM" "Role:$role" "检查中" "检查角色信任策略"
         
         # 获取角色信任策略
-        policy_doc=$(aws iam get-role --role-name "$role" --query 'Role.AssumeRolePolicyDocument' --output text 2>/dev/null || echo "")
-        if [ -n "$policy_doc" ] && [ "$policy_doc" != "None" ]; then
-            if check_org_keywords "$policy_doc"; then
-                log_issue "IAM" "Role:$role" "信任策略包含组织相关配置" "$policy_doc"
-                log_check_detail "IAM" "Role:$role" "有问题" "信任策略包含组织相关配置"
-                log_org_finding "Role Trust Policy" "$role" "$policy_doc"
-                echo "ISSUE_FOUND" >> "$temp_file"
+        local policy_doc
+        if policy_doc=$(aws iam get-role --role-name "$role" --query 'Role.AssumeRolePolicyDocument' --output text 2>/dev/null); then
+            if [ -n "$policy_doc" ] && [ "$policy_doc" != "None" ]; then
+                if check_org_keywords "$policy_doc"; then
+                    log_issue "IAM" "Role:$role" "信任策略包含组织相关配置" "$policy_doc"
+                    log_check_detail "IAM" "Role:$role" "有问题" "信任策略包含组织相关配置"
+                    log_org_finding "Role Trust Policy" "$role" "$policy_doc"
+                    echo "ISSUE_FOUND" >> "$temp_file"
+                else
+                    log_check_detail "IAM" "Role:$role" "正常" "信任策略无组织相关配置"
+                fi
             else
-                log_check_detail "IAM" "Role:$role" "正常" "信任策略无组织相关配置"
+                log_check_detail "IAM" "Role:$role" "无策略" "未找到信任策略"
             fi
         else
-            log_check_detail "IAM" "Role:$role" "无策略" "未找到信任策略"
+            log_check_detail "IAM" "Role:$role" "错误" "获取角色信任策略失败"
         fi
         
         # 检查附加的客户管理策略
-        aws iam list-attached-role-policies --role-name "$role" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null | tr '\t' '\n' | while read -r policy_arn; do
-            if [ -n "$policy_arn" ] && [ "$policy_arn" != "None" ]; then
-                # 只检查客户管理的策略
-                if [[ "$policy_arn" != *"arn:aws:iam::aws:policy"* ]]; then
-                    log_check_detail "IAM" "Policy:$policy_arn" "检查中" "检查客户管理策略"
-                    
-                    version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || echo "")
-                    if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
-                        policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null || echo "")
-                        if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
-                            if check_org_keywords "$policy_content"; then
-                                log_issue "IAM" "Policy:$policy_arn" "客户管理策略包含组织相关配置" "$policy_content"
-                                log_check_detail "IAM" "Policy:$policy_arn" "有问题" "客户管理策略包含组织相关配置"
-                                log_org_finding "Customer Managed Policy" "$policy_arn (attached to role: $role)" "$policy_content"
-                                echo "ISSUE_FOUND" >> "$temp_file"
+        local policies_output
+        if policies_output=$(aws iam list-attached-role-policies --role-name "$role" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null); then
+            echo "$policies_output" | tr '\t' '\n' | while read -r policy_arn; do
+                if [ -n "$policy_arn" ] && [ "$policy_arn" != "None" ]; then
+                    # 只检查客户管理的策略
+                    if [[ "$policy_arn" != *"arn:aws:iam::aws:policy"* ]]; then
+                        log_check_detail "IAM" "Policy:$policy_arn" "检查中" "检查客户管理策略"
+                        
+                        local version_id
+                        if version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null); then
+                            if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
+                                local policy_content
+                                if policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null); then
+                                    if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
+                                        if check_org_keywords "$policy_content"; then
+                                            log_issue "IAM" "Policy:$policy_arn" "客户管理策略包含组织相关配置" "$policy_content"
+                                            log_check_detail "IAM" "Policy:$policy_arn" "有问题" "客户管理策略包含组织相关配置"
+                                            log_org_finding "Customer Managed Policy" "$policy_arn (attached to role: $role)" "$policy_content"
+                                            echo "ISSUE_FOUND" >> "$temp_file"
+                                        else
+                                            log_check_detail "IAM" "Policy:$policy_arn" "正常" "客户管理策略无组织相关配置"
+                                        fi
+                                    else
+                                        log_check_detail "IAM" "Policy:$policy_arn" "无内容" "策略内容为空"
+                                    fi
+                                else
+                                    log_check_detail "IAM" "Policy:$policy_arn" "错误" "获取策略版本失败"
+                                fi
                             else
-                                log_check_detail "IAM" "Policy:$policy_arn" "正常" "客户管理策略无组织相关配置"
+                                log_check_detail "IAM" "Policy:$policy_arn" "错误" "获取策略版本ID失败"
                             fi
                         else
-                            log_check_detail "IAM" "Policy:$policy_arn" "无内容" "策略内容为空"
+                            log_check_detail "IAM" "Policy:$policy_arn" "错误" "获取策略信息失败"
                         fi
+                    else
+                        log_check_detail "IAM" "Policy:$policy_arn" "跳过" "AWS管理策略，已跳过"
                     fi
-                else
-                    log_check_detail "IAM" "Policy:$policy_arn" "跳过" "AWS管理策略，已跳过"
                 fi
-            fi
-        done
+            done
+        else
+            log_check_detail "IAM" "Role:$role" "错误" "获取角色附加策略失败"
+        fi
         
         echo "ROLE_PROCESSED" >> "$temp_file"
     } &
@@ -227,35 +261,55 @@ process_iam_user() {
     local user="$1"
     local temp_file="$TEMP_DIR/user_$user.tmp"
     
+    # 验证输入参数
+    if [ -z "$user" ] || [ "$user" = "None" ]; then
+        return 0
+    fi
+    
     {
         echo "检查用户: $user"
         log_check_detail "IAM" "User:$user" "检查中" "检查用户附加的客户管理策略"
         
-        aws iam list-attached-user-policies --user-name "$user" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null | tr '\t' '\n' | while read -r policy_arn; do
-            if [ -n "$policy_arn" ] && [ "$policy_arn" != "None" ]; then
-                # 只检查客户管理的策略
-                if [[ "$policy_arn" != *"arn:aws:iam::aws:policy"* ]]; then
-                    version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || echo "")
-                    if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
-                        policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null || echo "")
-                        if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
-                            if check_org_keywords "$policy_content"; then
-                                log_issue "IAM" "UserPolicy:$user->$policy_arn" "用户的客户管理策略包含组织相关配置" "$policy_content"
-                                log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "有问题" "用户的客户管理策略包含组织相关配置"
-                                log_org_finding "Customer Managed Policy" "$policy_arn (attached to user: $user)" "$policy_content"
-                                echo "ISSUE_FOUND" >> "$temp_file"
+        local policies_output
+        if policies_output=$(aws iam list-attached-user-policies --user-name "$user" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null); then
+            echo "$policies_output" | tr '\t' '\n' | while read -r policy_arn; do
+                if [ -n "$policy_arn" ] && [ "$policy_arn" != "None" ]; then
+                    # 只检查客户管理的策略
+                    if [[ "$policy_arn" != *"arn:aws:iam::aws:policy"* ]]; then
+                        local version_id
+                        if version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null); then
+                            if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
+                                local policy_content
+                                if policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null); then
+                                    if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
+                                        if check_org_keywords "$policy_content"; then
+                                            log_issue "IAM" "UserPolicy:$user->$policy_arn" "用户的客户管理策略包含组织相关配置" "$policy_content"
+                                            log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "有问题" "用户的客户管理策略包含组织相关配置"
+                                            log_org_finding "Customer Managed Policy" "$policy_arn (attached to user: $user)" "$policy_content"
+                                            echo "ISSUE_FOUND" >> "$temp_file"
+                                        else
+                                            log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "正常" "用户的客户管理策略无组织相关配置"
+                                        fi
+                                    else
+                                        log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "无内容" "策略内容为空"
+                                    fi
+                                else
+                                    log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "错误" "获取策略版本失败"
+                                fi
                             else
-                                log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "正常" "用户的客户管理策略无组织相关配置"
+                                log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "错误" "获取策略版本ID失败"
                             fi
                         else
-                            log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "无内容" "策略内容为空"
+                            log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "错误" "获取策略信息失败"
                         fi
+                    else
+                        log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "跳过" "AWS管理策略，已跳过"
                     fi
-                else
-                    log_check_detail "IAM" "UserPolicy:$user->$policy_arn" "跳过" "AWS管理策略，已跳过"
                 fi
-            fi
-        done
+            done
+        else
+            log_check_detail "IAM" "User:$user" "错误" "获取用户附加策略失败"
+        fi
         
         echo "USER_PROCESSED" >> "$temp_file"
     } &
@@ -266,24 +320,39 @@ process_standalone_policy() {
     local policy_arn="$1"
     local temp_file="$TEMP_DIR/policy_$(echo "$policy_arn" | sed 's/[^a-zA-Z0-9]/_/g').tmp"
     
+    # 验证输入参数
+    if [ -z "$policy_arn" ] || [ "$policy_arn" = "None" ]; then
+        return 0
+    fi
+    
     {
         log_check_detail "IAM" "StandalonePolicy:$policy_arn" "检查中" "检查独立的客户管理策略"
         
-        version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null || echo "")
-        if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
-            policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null || echo "")
-            if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
-                if check_org_keywords "$policy_content"; then
-                    log_issue "IAM" "StandalonePolicy:$policy_arn" "独立的客户管理策略包含组织相关配置" "$policy_content"
-                    log_check_detail "IAM" "StandalonePolicy:$policy_arn" "有问题" "独立的客户管理策略包含组织相关配置"
-                    log_org_finding "Standalone Customer Managed Policy" "$policy_arn" "$policy_content"
-                    echo "ISSUE_FOUND" >> "$temp_file"
+        local version_id
+        if version_id=$(aws iam get-policy --policy-arn "$policy_arn" --query 'Policy.DefaultVersionId' --output text 2>/dev/null); then
+            if [ -n "$version_id" ] && [ "$version_id" != "None" ]; then
+                local policy_content
+                if policy_content=$(aws iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id" --query 'PolicyVersion.Document' --output text 2>/dev/null); then
+                    if [ -n "$policy_content" ] && [ "$policy_content" != "None" ]; then
+                        if check_org_keywords "$policy_content"; then
+                            log_issue "IAM" "StandalonePolicy:$policy_arn" "独立的客户管理策略包含组织相关配置" "$policy_content"
+                            log_check_detail "IAM" "StandalonePolicy:$policy_arn" "有问题" "独立的客户管理策略包含组织相关配置"
+                            log_org_finding "Standalone Customer Managed Policy" "$policy_arn" "$policy_content"
+                            echo "ISSUE_FOUND" >> "$temp_file"
+                        else
+                            log_check_detail "IAM" "StandalonePolicy:$policy_arn" "正常" "独立的客户管理策略无组织相关配置"
+                        fi
+                    else
+                        log_check_detail "IAM" "StandalonePolicy:$policy_arn" "无内容" "策略内容为空"
+                    fi
                 else
-                    log_check_detail "IAM" "StandalonePolicy:$policy_arn" "正常" "独立的客户管理策略无组织相关配置"
+                    log_check_detail "IAM" "StandalonePolicy:$policy_arn" "错误" "获取策略版本失败"
                 fi
             else
-                log_check_detail "IAM" "StandalonePolicy:$policy_arn" "无内容" "策略内容为空"
+                log_check_detail "IAM" "StandalonePolicy:$policy_arn" "错误" "获取策略版本ID失败"
             fi
+        else
+            log_check_detail "IAM" "StandalonePolicy:$policy_arn" "错误" "获取策略信息失败"
         fi
         
         echo "POLICY_PROCESSED" >> "$temp_file"
