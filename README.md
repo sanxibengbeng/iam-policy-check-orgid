@@ -52,7 +52,10 @@ chmod +x check-org-policies.sh
 ./check-org-policies.sh
 
 # 运行优化版本（推荐）
-./check-org-policies-optimized.sh
+./check-org-policies-optimized-v2.sh
+
+# 运行Python版本（跨平台，推荐）
+python3 check_org_policies.py
 ```
 
 ### 基本使用
@@ -85,6 +88,28 @@ MAX_PARALLEL_JOBS=5 ./check-org-policies-optimized.sh
 DEBUG=1 MAX_PARALLEL_JOBS=15 ./check-org-policies-optimized.sh
 ```
 
+### Python版本使用
+
+```bash
+# 安装依赖
+pip install -r requirements.txt
+
+# 基本使用
+python3 check_org_policies.py
+
+# 自定义并发数
+python3 check_org_policies.py --max-workers 20
+
+# CloudShell 环境推荐配置
+python3 check_org_policies.py --max-workers 8
+
+# 启用调试模式
+python3 check_org_policies.py --debug
+
+# 环境变量配置
+MAX_PARALLEL_JOBS=15 python3 check_org_policies.py
+```
+
 ### 测试工具
 
 ```bash
@@ -105,6 +130,9 @@ DEBUG=1 MAX_PARALLEL_JOBS=15 ./check-org-policies-optimized.sh
 
 # 并发性能测试（推荐）
 ./test-concurrency.sh
+
+# Python版本功能测试
+python3 test-python-version.py
 ```
 
 ## 版本说明
