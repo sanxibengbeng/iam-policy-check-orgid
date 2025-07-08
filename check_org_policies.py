@@ -65,8 +65,8 @@ class OrgPolicyChecker:
             "aws:SourceOrgID",
             "aws:SourceOrgPaths",
             "organizations:",
-            r"o-[a-z0-9]{10}",
-            r"ou-[a-z0-9]+-[a-z0-9]{8}"
+            r"^o-[a-z0-9]{10}",
+            r"^ou-[a-z0-9]+-[a-z0-9]{8}"
         ]
         
         # 创建输出目录和文件
@@ -611,7 +611,7 @@ def main():
     args = parser.parse_args()
     
     # 从环境变量获取配置
-    max_workers = args.max_workers or int(os.getenv('MAX_PARALLEL_JOBS', 0)) or None
+    max_workers = args.max_workers or int(os.getenv('MAX_PARALLEL_JOBS', 10)) or None
     debug = args.debug or os.getenv('DEBUG') == '1'
     
     try:
