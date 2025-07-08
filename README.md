@@ -99,6 +99,12 @@ DEBUG=1 MAX_PARALLEL_JOBS=15 ./check-org-policies-optimized.sh
 
 # 性能测试（对比原版本和优化版本）
 ./performance-test.sh
+
+# jq修复验证
+./test-jq-fix.sh
+
+# 并发性能测试（推荐）
+./test-concurrency.sh
 ```
 
 ## 版本说明
@@ -108,12 +114,26 @@ DEBUG=1 MAX_PARALLEL_JOBS=15 ./check-org-policies-optimized.sh
 - 适合小规模环境
 - 兼容性最佳
 
-### 优化版本 (check-org-policies-optimized.sh) ⭐ 推荐
+### 优化版本 v1 (check-org-policies-optimized.sh)
 - **并行化处理**: IAM检查支持并行执行
-- **性能提升**: 3-5倍性能提升
-- **可配置**: 支持自定义并行任务数
-- **线程安全**: 完整的并发安全机制
+- **已知问题**: 并发实现有缺陷，实际并发度不高
+- **状态**: 不推荐使用
+
+### 优化版本 v2 (check-org-policies-optimized-v2.sh) ⭐ 强烈推荐
+- **修复并发问题**: 正确实现真正的并行处理
+- **CloudShell优化**: 自动检测CloudShell环境并优化配置
+- **性能提升**: 3-8倍性能提升（取决于环境和资源数量）
+- **智能配置**: 根据环境自动选择最佳并发数
+- **进度显示**: 实时显示处理进度
 - **向后兼容**: 输出格式与原版本完全兼容
+
+### CloudShell 环境并发建议
+
+| 配置类型 | 推荐并发数 | 适用场景 |
+|----------|------------|----------|
+| **保守配置** | 5 | 首次使用、网络不稳定 |
+| **平衡配置** | 8 | 日常使用（推荐） |
+| **激进配置** | 10-12 | 资源充足、追求速度 |
 
 ### 性能对比
 
