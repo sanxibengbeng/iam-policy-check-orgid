@@ -65,8 +65,8 @@ class OrgPolicyChecker:
             "aws:SourceOrgID",
             "aws:SourceOrgPaths",
             "organizations:",
-            r"^o-[a-z0-9]{10}",
-            r"^ou-[a-z0-9]+-[a-z0-9]{8}"
+            r"\bo-[a-z0-9]{10}",
+            r"\bou-[a-z0-9]+-[a-z0-9]{8}"
         ]
         
         # 创建输出目录和文件
